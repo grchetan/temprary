@@ -83,16 +83,39 @@ export async function uploadImageWithProgress(
 
   try {
     const storage = await getStorageClient();
-    const { ref, uploadBytesResumable, getDownloadURL } = await import("firebase/storage");
+    const { ref, uploadBytesResumable, getDownloadURL, setMaxUploadRetryTime } = await import("firebase/storage");
+    try {
+      setMaxUploadRetryTime(storage, 3000);
+    } catch {}
     const path = `${folder}/${Date.now()}-${payload.name.replace(/[^\w.-]+/g, "-")}`;
     const r = ref(storage, path);
 
     const task = uploadBytesResumable(r, payload, { contentType: payload.type });
 
     const storagePromise = new Promise<string>((resolve, reject) => {
+      let connectionTimer: any = setTimeout(() => {
+        if (task.snapshot.bytesTransferred === 0) {
+          try {
+            task.cancel();
+          } catch {}
+          reject(new Error("Firebase Storage unreachable or disabled. Defaulting to local Base64."));
+        }
+      }, 2500);
+
+      const uploadTimer = setTimeout(() => {
+        try {
+          task.cancel();
+        } catch {}
+        reject(new Error("Upload timeout — transmission took too long. Defaulting to local Base64."));
+      }, 60000);
+
       task.on(
         "state_changed",
         (snapshot) => {
+          if (snapshot.bytesTransferred > 0 && connectionTimer) {
+            clearTimeout(connectionTimer);
+            connectionTimer = null;
+          }
           const pct = Math.min(
             99,
             Math.max(30, Math.round((snapshot.bytesTransferred / (snapshot.totalBytes || 1)) * 70 + 30)),
@@ -107,8 +130,14 @@ export async function uploadImageWithProgress(
             compressedSize: payload.size,
           });
         },
-        (error) => reject(error),
+        (error) => {
+          if (connectionTimer) clearTimeout(connectionTimer);
+          clearTimeout(uploadTimer);
+          reject(error);
+        },
         async () => {
+          if (connectionTimer) clearTimeout(connectionTimer);
+          clearTimeout(uploadTimer);
           try {
             const downloadUrl = await getDownloadURL(task.snapshot.ref);
             onProgress?.({
@@ -128,16 +157,7 @@ export async function uploadImageWithProgress(
       );
     });
 
-    const timeoutPromise = new Promise<string>((_, reject) => {
-      setTimeout(() => {
-        try {
-          task.cancel();
-        } catch {}
-        reject(new Error("Storage timeout — auto-switching to Base64"));
-      }, 3500);
-    });
-
-    return await Promise.race([storagePromise, timeoutPromise]);
+    return await storagePromise;
   } catch (err) {
     console.warn("[Firebase Storage Timeout/Unavailable — Auto-storing as compressed WebP Data URL]", err);
     // Fallback: convert compressed WebP file to Base64 Data URL (Works 100% FREE without paid Firebase plan)

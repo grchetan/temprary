@@ -587,16 +587,7 @@ export function ArcadeControlManager() {
             </div>
           );
         }
-        return (
-          <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-3.5 flex items-center gap-3">
-            <span className="flex size-7 items-center justify-center rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-500 shrink-0">
-              <CheckCircle2 className="size-4" />
-            </span>
-            <span className="font-mono text-[0.65rem] font-bold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
-              🟢 Firebase Cloud Sync Active (Standings are fully synced across all browsers!)
-            </span>
-          </div>
-        );
+        return null;
       })()}
 
       {/* Dynamic Summary Stats Dashboard */}
@@ -1489,9 +1480,9 @@ export function ArcadeControlManager() {
                           onClick={() => {
                             setConfirmConfig({
                               isOpen: true,
-                              title: "Delete All Player Scores",
-                              message: `Are you sure you want to delete ALL scores for ${row.name}? This will remove all of their runs from all leaderboards.`,
-                              confirmText: "Delete All",
+                              title: "Delete Player Account & Scores",
+                              message: `⚠️ Are you sure you want to delete the player account and ALL scores for ${row.name}? This will permanently remove all of their runs and release the username "${row.name}" so it can be registered again.`,
+                              confirmText: "Delete Account & Scores",
                               cancelText: "Cancel",
                               isDestructive: true,
                               onConfirm: async () => {

@@ -199,7 +199,7 @@ export function EntryShowcase({ entries, className }: { entries: Entry[]; classN
                       decoding="async"
                       src={cover}
                       alt={`${entry.title} preview`}
-                      className="w-full h-auto rounded-[calc(var(--radius-lg)-0.35rem)] object-contain transition-transform duration-700 group-hover:scale-[1.02]"
+                      className="mx-auto max-h-[480px] w-auto rounded-[calc(var(--radius-lg)-0.35rem)] object-contain transition-transform duration-700 group-hover:scale-[1.02]"
                     />
                   </AnimatedBorderTrail>
                 </Link>
@@ -293,7 +293,7 @@ export function EntryDetail({ entry, backTo, backLabel }: { entry: Entry; backTo
                 decoding="async"
                 src={src}
                 alt={`${entry.title} screen ${i + 1}`}
-                className="w-full h-auto rounded-[calc(var(--radius-lg)-0.35rem)] object-contain"
+                className="mx-auto max-h-[520px] w-auto rounded-[calc(var(--radius-lg)-0.35rem)] object-contain"
               />
             </motion.figure>
           ))}

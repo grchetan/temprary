@@ -467,7 +467,7 @@ export async function fetchLeaderboard(): Promise<ScoreRow[]> {
   if (isFirebaseConfigured) {
     try {
       const db = await getDb();
-      const { collection, getDocs, query, orderBy, limit } = await import("firebase/firestore");
+      const { collection, getDocs, query, orderBy, limit, doc, setDoc } = await import("firebase/firestore");
       const snap = await getDocs(query(collection(db, SCORES), orderBy("score", "desc"), limit(600)));
       const remoteRows: ScoreRow[] = snap.docs.map((d) => {
         const raw = d.data() as Record<string, unknown>;
@@ -483,6 +483,35 @@ export async function fetchLeaderboard(): Promise<ScoreRow[]> {
           createdAt: ts?.toMillis?.() ?? Date.now(),
         };
       });
+
+      // Background Sync: Upload local offline scores to Firestore
+      const remoteIds = new Set(remoteRows.map((r) => r.id));
+      for (const local of localRows) {
+        if (!remoteIds.has(local.id)) {
+          try {
+            await setDoc(doc(db, SCORES, local.id), {
+              playerId: local.playerId,
+              name: local.name,
+              handle: local.handle,
+              score: local.score,
+              accuracy: local.accuracy,
+              combo: local.combo,
+              createdAt: new Date(local.createdAt),
+            });
+            const pId = local.playerId.startsWith("local-") ? local.playerId.replace("local-", "") : local.playerId;
+            await setDoc(doc(db, PLAYERS, pId), {
+              name: local.name,
+              handle: local.handle,
+              best: local.score,
+              plays: 1,
+              createdAt: new Date(local.createdAt),
+            }, { merge: true });
+          } catch (syncErr) {
+            console.warn("[Offline score sync failed]:", syncErr);
+          }
+        }
+      }
+
       return mergeRawScores(remoteRows, localRows);
     } catch (err) {
       console.error("[Firebase fetchLeaderboard Error]:", err);
@@ -912,23 +941,32 @@ export async function deleteAllScores(): Promise<void> {
   }
 }
 
-/** Delete all scores for a specific player (by playerId or handle). */
+/** Delete all scores and the player profile account (releasing their username). */
 export async function deletePlayerScores(playerId: string): Promise<void> {
   const store = readLocal();
+  // Remove scores
   store.scores = store.scores.filter((s) => s.playerId !== playerId && s.handle !== playerId);
+  // Remove player profile account
+  store.players = store.players.filter((p) => p.id !== playerId && p.handle !== playerId);
   writeLocal(store);
   if (typeof window !== "undefined") window.dispatchEvent(new Event("arcade:scores"));
 
   if (isFirebaseConfigured) {
     try {
       const db = await getDb();
-      const { collection, getDocs, query, where, writeBatch } = await import("firebase/firestore");
+      const { collection, getDocs, query, where, writeBatch, doc, deleteDoc } = await import("firebase/firestore");
+      
+      // 1. Delete scores from Firestore
       const snap = await getDocs(query(collection(db, SCORES), where("playerId", "==", playerId)));
       const batch = writeBatch(db);
       snap.docs.forEach((d) => batch.delete(d.ref));
       await batch.commit();
+
+      // 2. Delete player account profile from Firestore
+      const pId = playerId.startsWith("local-") ? playerId.replace("local-", "") : playerId;
+      await deleteDoc(doc(db, PLAYERS, pId));
     } catch (err) {
-      console.warn("[Delete Player Scores Failed]:", err);
+      console.warn("[Delete Player Scores & Account Failed]:", err);
     }
   }
 }

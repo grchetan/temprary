@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { motion } from "motion/react";
 import {
@@ -329,6 +329,8 @@ function ContentManager() {
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<UploadProgressInfo | null>(null);
+  const [imageMetadata, setImageMetadata] = useState<Record<string, { originalSize: number; compressedSize: number }>>({});
+  const uploadCancelledRef = useRef(false);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
@@ -370,13 +372,35 @@ function ContentManager() {
     if (!files?.length) return;
     const list = Array.from(files);
     setUploading(true);
+    uploadCancelledRef.current = false;
     try {
       const urls: string[] = [];
       for (const file of list) {
+        if (uploadCancelledRef.current) break;
+        let lastInfo: UploadProgressInfo | null = null;
         const url = await uploadImageWithProgress(file, form.kind, (info) => {
+          if (uploadCancelledRef.current) return;
+          lastInfo = info;
           setUploadProgress(info);
         });
+        if (uploadCancelledRef.current) break;
+
+        // Save compression stats
+        if (lastInfo && (lastInfo as UploadProgressInfo).originalSize && (lastInfo as UploadProgressInfo).compressedSize) {
+          const info = lastInfo as UploadProgressInfo;
+          setImageMetadata((prev) => ({
+            ...prev,
+            [url]: {
+              originalSize: info.originalSize!,
+              compressedSize: info.compressedSize!,
+            },
+          }));
+        }
         urls.push(url);
+      }
+      if (uploadCancelledRef.current) {
+        toast.info("Upload cancelled.");
+        return;
       }
       setForm((f) => ({ ...f, images: [...f.images, ...urls] }));
       toast.success(`${urls.length} image${urls.length > 1 ? "s" : ""} compressed & uploaded.`);
@@ -747,9 +771,9 @@ function ContentManager() {
                     onClick={(e) => {
                       e.stopPropagation();
                       e.preventDefault();
+                      uploadCancelledRef.current = true;
                       setUploading(false);
                       setUploadProgress(null);
-                      toast.info("Upload cancelled.");
                     }}
                     className="mt-2 inline-flex items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-3 py-1 font-mono text-[0.65rem] uppercase tracking-wider text-destructive transition-colors hover:bg-destructive/20"
                   >
@@ -802,9 +826,41 @@ function ContentManager() {
                             {i === 0 ? "★ Cover Image" : `Image ${i + 1}`}
                           </span>
                         </div>
-                        <p className="caption truncate mt-1.5 font-mono text-[0.72rem] text-ink-soft">
-                          {src.startsWith("data:") ? "Base64 WebP (Compressed)" : src.split("/").pop()}
-                        </p>
+                        {(() => {
+                          const meta = imageMetadata[src];
+                          if (meta) {
+                            const savings = Math.round(((meta.originalSize - meta.compressedSize) / meta.originalSize) * 100);
+                            return (
+                              <div className="mt-1.5 flex flex-wrap gap-1.5 items-center font-mono text-[0.72rem] text-ink-soft">
+                                <span className="truncate max-w-[120px] sm:max-w-[200px]">
+                                  {src.startsWith("data:") ? "Local WebP" : src.split("/").pop()}
+                                </span>
+                                <span>•</span>
+                                <span>{formatBytes(meta.originalSize)}</span>
+                                <span>→</span>
+                                <span className="text-emerald-600 dark:text-emerald-400 font-semibold">{formatBytes(meta.compressedSize)}</span>
+                                <span className="rounded bg-emerald-500/10 dark:bg-emerald-500/20 px-1.5 py-0.5 text-[0.62rem] font-bold text-emerald-600 dark:text-emerald-400">
+                                  Saved {savings}%
+                                </span>
+                              </div>
+                            );
+                          }
+                          if (src.startsWith("data:")) {
+                            const size = Math.round((src.length * 3) / 4);
+                            return (
+                              <div className="mt-1.5 flex flex-wrap gap-1.5 items-center font-mono text-[0.72rem] text-ink-soft">
+                                <span>Local WebP (Base64)</span>
+                                <span>•</span>
+                                <span className="text-emerald-600 dark:text-emerald-400 font-semibold">~{formatBytes(size)}</span>
+                              </div>
+                            );
+                          }
+                          return (
+                            <p className="caption truncate mt-1.5 font-mono text-[0.72rem] text-ink-soft">
+                              {src.split("/").pop()}
+                            </p>
+                          );
+                        })()}
                       </div>
                     </div>
 
