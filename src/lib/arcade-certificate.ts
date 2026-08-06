@@ -6,7 +6,7 @@ const ascii = (s: string) => s.replace(/[–—]/g, "-").replace(/[“”]/g, '"
  * Builds a landscape A4 certificate for a leaderboard placing.
  * Returns a jsPDF instance so callers can save() or preview it.
  */
-export async function buildArcadeCertificate(row: RankedRow) {
+export async function buildArcadeCertificate(row: RankedRow, customTitle?: string) {
   const { jsPDF } = await import("jspdf");
   const pdf = new jsPDF({ unit: "pt", format: "a4", orientation: "landscape" });
 
@@ -64,7 +64,7 @@ export async function buildArcadeCertificate(row: RankedRow) {
   pdf.line(W / 2 - 150, 236, W / 2 + 150, 236);
 
   centre(
-    `for finishing ${tier?.note ?? `rank #${row.rank}`} on the Signal Rush leaderboard`,
+    `for finishing ${tier?.note ?? `rank #${row.rank}`} on the ${customTitle ?? "Signal Rush leaderboard"}`,
     268,
     { size: 12 },
   );
@@ -148,7 +148,7 @@ export async function buildArcadeCertificate(row: RankedRow) {
   return pdf;
 }
 
-export async function downloadArcadeCertificate(row: RankedRow) {
-  const pdf = await buildArcadeCertificate(row);
+export async function downloadArcadeCertificate(row: RankedRow, customTitle?: string) {
+  const pdf = await buildArcadeCertificate(row, customTitle);
   pdf.save(`signal-rush-${row.handle}-rank-${row.rank}.pdf`);
 }

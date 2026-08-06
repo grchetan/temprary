@@ -15,6 +15,10 @@ const SCORES = "scores";
 const LS_PLAYER = "arcade-player";
 const LS_STORE = "arcade-store";
 
+let lastFirebaseError: string | null = null;
+export function getLastFirebaseError() { return lastFirebaseError; }
+export function setLastFirebaseError(err: string | null) { lastFirebaseError = err; }
+
 export type Player = {
   id: string;
   name: string;
@@ -153,7 +157,7 @@ export function validateName(raw: string, customWords?: string[]): string | null
 export function validateScore(run: { score: number; accuracy: number; combo: number }): boolean {
   if (typeof run.score !== "number" || isNaN(run.score) || run.score < 0) return false;
   if (typeof run.accuracy !== "number" || isNaN(run.accuracy) || run.accuracy < 0 || run.accuracy > 100) return false;
-  if (typeof run.combo !== "number" || isNaN(run.combo) || run.combo < 1 || run.combo > 12) return false;
+  if (typeof run.combo !== "number" || isNaN(run.combo) || run.combo < 0 || run.combo > 12) return false;
   // Anti-Cheat Hard Cap: A 45-second round score cannot mathematically exceed 25,000 points.
   if (run.score > 25000) return false;
   return true;
@@ -286,6 +290,8 @@ export async function createPlayer(rawName: string): Promise<Player> {
       return player;
     } catch (err) {
       if (err instanceof NameTakenError) throw err;
+      console.error("[Firebase createPlayer Error]:", err);
+      setLastFirebaseError(err instanceof Error ? err.message : String(err));
       /* network/permission issue — fall through to local */
     }
   }
@@ -322,7 +328,9 @@ export async function resumePlayer(rawCode: string): Promise<Player> {
         writeSessionPlayer(player);
         return player;
       }
-    } catch {
+    } catch (err) {
+      console.error("[Firebase resumePlayer Error]:", err);
+      setLastFirebaseError(err instanceof Error ? err.message : String(err));
       /* fall through to local lookup */
     }
   }
@@ -341,6 +349,7 @@ export async function submitScore(input: {
   accuracy: number;
   combo: number;
 }): Promise<void> {
+  const { player } = input;
   const score = Math.max(0, Math.round(input.score));
   const accuracy = Math.max(0, Math.min(100, Math.round(input.accuracy)));
   const combo = Math.max(0, Math.round(input.combo));
@@ -429,7 +438,18 @@ export function rank(rows: ScoreRow[]): RankedRow[] {
     .map((entry, i) => ({ ...entry.row, plays: entry.plays, rank: i + 1 }));
 }
 
-function deduplicateAndRank(remoteRows: ScoreRow[], localRows: ScoreRow[]): RankedRow[] {
+/**
+ * Re-rank an already-filtered subset of RankedRows so that rank #1 is
+ * the top scorer within the subset, not the global rank.
+ */
+export function reRankFiltered(rows: RankedRow[]): RankedRow[] {
+  return rows
+    .slice()
+    .sort((a, b) => b.score - a.score || b.accuracy - a.accuracy || a.createdAt - b.createdAt)
+    .map((r, i) => ({ ...r, rank: i + 1 }));
+}
+
+function mergeRawScores(remoteRows: ScoreRow[], localRows: ScoreRow[]): ScoreRow[] {
   // Start with local rows as a base
   const map = new Map<string, ScoreRow>();
   for (const l of localRows) {
@@ -439,10 +459,10 @@ function deduplicateAndRank(remoteRows: ScoreRow[], localRows: ScoreRow[]): Rank
   for (const r of remoteRows) {
     map.set(r.id, r);
   }
-  return rank(Array.from(map.values()));
+  return Array.from(map.values());
 }
 
-export async function fetchLeaderboard(): Promise<RankedRow[]> {
+export async function fetchLeaderboard(): Promise<ScoreRow[]> {
   const localRows = readLocal().scores;
   if (isFirebaseConfigured) {
     try {
@@ -463,12 +483,14 @@ export async function fetchLeaderboard(): Promise<RankedRow[]> {
           createdAt: ts?.toMillis?.() ?? Date.now(),
         };
       });
-      return deduplicateAndRank(remoteRows, localRows);
-    } catch {
+      return mergeRawScores(remoteRows, localRows);
+    } catch (err) {
+      console.error("[Firebase fetchLeaderboard Error]:", err);
+      setLastFirebaseError(err instanceof Error ? err.message : String(err));
       /* fall through */
     }
   }
-  return rank(localRows);
+  return localRows;
 }
 
 /**
@@ -476,7 +498,7 @@ export async function fetchLeaderboard(): Promise<RankedRow[]> {
  * falls back to local storage events + light polling in demo mode.
  * Returns an unsubscribe function.
  */
-export function subscribeLeaderboard(onRows: (rows: RankedRow[]) => void): () => void {
+export function subscribeLeaderboard(onRows: (rows: ScoreRow[]) => void): () => void {
   let stop: (() => void) | null = null;
   let cancelled = false;
 
@@ -503,19 +525,23 @@ export function subscribeLeaderboard(onRows: (rows: RankedRow[]) => void): () =>
                 createdAt: ts?.toMillis?.() ?? Date.now(),
               };
             });
-            onRows(deduplicateAndRank(remoteRows, readLocal().scores));
+            onRows(mergeRawScores(remoteRows, readLocal().scores));
           },
-          () => {
-            onRows(rank(readLocal().scores));
+          (err) => {
+            console.error("[Firebase subscribeLeaderboard Snapshot Error]:", err);
+            setLastFirebaseError(err.message);
+            onRows(readLocal().scores);
           },
         );
-      } catch {
+      } catch (err) {
+        console.error("[Firebase subscribeLeaderboard Init Error]:", err);
+        setLastFirebaseError(err instanceof Error ? err.message : String(err));
         /* fall through to local mode below */
       }
     })();
   }
 
-  const pushLocal = () => onRows(rank(readLocal().scores));
+  const pushLocal = () => onRows(readLocal().scores);
   const onEvt = () => pushLocal();
   if (typeof window !== "undefined") {
     window.addEventListener("arcade:scores", onEvt);
@@ -545,7 +571,7 @@ export function useLeaderboard() {
 
   useEffect(() => {
     return subscribeLeaderboard((rows) => {
-      queryClient.setQueryData<RankedRow[]>(["arcade", "leaderboard"], rows);
+      queryClient.setQueryData<ScoreRow[]>(["arcade", "leaderboard"], rows);
     });
   }, [queryClient]);
 
@@ -644,13 +670,23 @@ export function ensureConfigDefaults(config: ArcadeConfig): ArcadeConfig {
     ? config.forbiddenWords
     : DEFAULT_FORBIDDEN_WORDS;
 
+  // Only merge local registrations if the local stored version matches the incoming version
+  // This prevents old version registrations from polluting new contest version counts
   let localRegs: string[] = [];
   if (typeof localStorage !== "undefined") {
     try {
       const raw = localStorage.getItem("arcade-config");
       if (raw) {
         const parsed = JSON.parse(raw) as ArcadeConfig;
-        if (Array.isArray(parsed?.contest?.registrations)) {
+        const localVersion = parsed?.contest?.version;
+        const incomingVersion = config.contest?.version;
+        // Only carry over local regs if same version
+        if (
+          localVersion &&
+          incomingVersion &&
+          localVersion === incomingVersion &&
+          Array.isArray(parsed?.contest?.registrations)
+        ) {
           localRegs = parsed.contest.registrations;
         }
       }
@@ -659,7 +695,7 @@ export function ensureConfigDefaults(config: ArcadeConfig): ArcadeConfig {
     }
   }
 
-  const incomingRegs = Array.isArray(config.contest?.registrations) ? config.contest!.registrations : [];
+  const incomingRegs = Array.isArray(config.contest?.registrations) ? config.contest!.registrations! : [];
   const mergedRegs = Array.from(new Set([...incomingRegs, ...localRegs]));
 
   const contest = config.contest
@@ -721,7 +757,9 @@ export async function fetchArcadeConfig(): Promise<ArcadeConfig> {
       writeLocalConfig(data);
       return data;
     }
-  } catch {
+  } catch (err) {
+    console.error("[Firebase fetchArcadeConfig Error]:", err);
+    setLastFirebaseError(err instanceof Error ? err.message : String(err));
     /* fall back to local */
   }
   return local;
@@ -759,7 +797,9 @@ export function subscribeArcadeConfig(onConfig: (cfg: ArcadeConfig) => void): ()
             onConfig(data);
           }
         });
-      } catch {
+      } catch (err) {
+        console.error("[Firebase subscribeArcadeConfig Error]:", err);
+        setLastFirebaseError(err instanceof Error ? err.message : String(err));
         /* fall back */
       }
     })();
@@ -846,6 +886,78 @@ export async function resetWeeklyLeaderboard(): Promise<ArcadeConfig> {
   const updatedConfig: ArcadeConfig = {
     ...current,
     weeklyResetAt: Date.now(),
+  };
+  await updateArcadeConfig(updatedConfig);
+  return updatedConfig;
+}
+
+/** Delete ALL scores from leaderboard (lifetime reset). */
+export async function deleteAllScores(): Promise<void> {
+  const store = readLocal();
+  store.scores = [];
+  writeLocal(store);
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("arcade:scores"));
+
+  if (isFirebaseConfigured) {
+    try {
+      const db = await getDb();
+      const { collection, getDocs, deleteDoc, writeBatch } = await import("firebase/firestore");
+      const snap = await getDocs(collection(db, SCORES));
+      const batch = writeBatch(db);
+      snap.docs.forEach((d) => batch.delete(d.ref));
+      await batch.commit();
+    } catch (err) {
+      console.warn("[Delete All Scores Failed]:", err);
+    }
+  }
+}
+
+/** Delete all scores for a specific player (by playerId or handle). */
+export async function deletePlayerScores(playerId: string): Promise<void> {
+  const store = readLocal();
+  store.scores = store.scores.filter((s) => s.playerId !== playerId && s.handle !== playerId);
+  writeLocal(store);
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("arcade:scores"));
+
+  if (isFirebaseConfigured) {
+    try {
+      const db = await getDb();
+      const { collection, getDocs, query, where, writeBatch } = await import("firebase/firestore");
+      const snap = await getDocs(query(collection(db, SCORES), where("playerId", "==", playerId)));
+      const batch = writeBatch(db);
+      snap.docs.forEach((d) => batch.delete(d.ref));
+      await batch.commit();
+    } catch (err) {
+      console.warn("[Delete Player Scores Failed]:", err);
+    }
+  }
+}
+
+/** Ban a player by handle or playerId. */
+export async function banPlayer(handleOrId: string): Promise<void> {
+  const current = await fetchArcadeConfig();
+  const banned = Array.from(new Set([...(current.bannedPlayers ?? []), handleOrId]));
+  await updateArcadeConfig({ ...current, bannedPlayers: banned });
+}
+
+/** Unban a player by handle or playerId. */
+export async function unbanPlayer(handleOrId: string): Promise<void> {
+  const current = await fetchArcadeConfig();
+  const banned = (current.bannedPlayers ?? []).filter((b) => b !== handleOrId);
+  await updateArcadeConfig({ ...current, bannedPlayers: banned });
+}
+
+/** Reset Contest leaderboard by bumping contest startAt to now (scores before this are hidden). */
+export async function resetContestLeaderboard(): Promise<ArcadeConfig> {
+  const current = await fetchArcadeConfig();
+  if (!current.contest) return current;
+  const updatedConfig: ArcadeConfig = {
+    ...current,
+    contest: {
+      ...current.contest,
+      startAt: Date.now(),
+      registrations: [],
+    },
   };
   await updateArcadeConfig(updatedConfig);
   return updatedConfig;

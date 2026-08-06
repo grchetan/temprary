@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useMotionValue, useSpring } from "motion/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, Award, Check, Copy, Crown, Download, Gamepad2, KeyRound, LogOut, Medal, Trophy, Lock, Clock, Ban, Megaphone, Sparkles, Zap } from "lucide-react";
+import { AlertTriangle, Award, Check, Copy, Crown, Download, Gamepad2, KeyRound, LogOut, Medal, Trophy, Lock, Clock, Ban, Megaphone, Sparkles, Zap, ShieldAlert } from "lucide-react";
 import { Section, SectionHeading, Reveal, RegMark } from "@/components/site/primitives";
 import { SignalRush, type RunResult } from "@/components/site/arcade-game";
 import { downloadArcadeCertificate } from "@/lib/arcade-certificate";
@@ -17,6 +17,8 @@ import {
   readSessionPlayer,
   registerForContest,
   resumePlayer,
+  reRankFiltered,
+  rank,
   submitScore,
   tierFor,
   useArcadeConfig,
@@ -62,7 +64,9 @@ function CodeReveal({ player, onContinue }: { player: Player; onContinue: () => 
       setCopied(true);
       toast.success("Player ID copied — save it somewhere safe.");
     } catch {
-      toast.error("Copy failed — select the code and copy it manually.");
+      // Fallback: select the text so user can copy manually
+      setCopied(true); // allow continue anyway
+      toast.info("Select the code above and press Ctrl+C to copy it manually.");
     }
   };
 
@@ -77,7 +81,20 @@ function CodeReveal({ player, onContinue }: { player: Player; onContinue: () => 
       </p>
 
       <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center">
-        <code className="flex-1 select-all rounded-2xl border border-ink/15 bg-paper/80 px-5 py-3 text-center font-mono text-lg tracking-[0.22em] text-ink">
+        <code
+          className="flex-1 select-all cursor-text rounded-2xl border border-ink/15 bg-paper/80 px-5 py-3 text-center font-mono text-lg tracking-[0.22em] text-ink"
+          onClick={() => {
+            if (window.getSelection && document.createRange) {
+              const el = document.activeElement;
+              if (el) {
+                const range = document.createRange();
+                range.selectNode(el);
+                window.getSelection()?.removeAllRanges();
+                window.getSelection()?.addRange(range);
+              }
+            }
+          }}
+        >
           {code}
         </code>
         <button
@@ -93,12 +110,22 @@ function CodeReveal({ player, onContinue }: { player: Player; onContinue: () => 
       <button
         type="button"
         onClick={onContinue}
-        disabled={!copied}
-        className="mt-6 inline-flex items-center gap-2 rounded-full border border-ink/15 px-5 py-2.5 font-mono text-[0.66rem] uppercase tracking-[0.18em] text-ink transition hover:bg-ink hover:text-paper disabled:opacity-50"
+        className={cn(
+          "mt-6 inline-flex items-center gap-2 rounded-full px-5 py-2.5 font-mono text-[0.66rem] uppercase tracking-[0.18em] transition",
+          copied
+            ? "bg-ink text-paper hover:opacity-90"
+            : "border border-ink/15 text-ink hover:bg-ink hover:text-paper"
+        )}
       >
         <Gamepad2 className="size-3.5" />
-        {copied ? "I saved it — start playing" : "Copy the ID to continue"}
+        {copied ? "Let's play! →" : "I saved my ID — Start playing"}
       </button>
+
+      {!copied && (
+        <p className="mt-3 font-mono text-[0.62rem] uppercase tracking-[0.14em] text-ink-soft">
+          ↑ Copy your ID first, then start playing
+        </p>
+      )}
     </div>
   );
 }
@@ -423,10 +450,14 @@ function LeaderboardTable({
   rows,
   meId,
   meHandle,
+  boardTab,
+  config,
 }: {
   rows: RankedRow[];
   meId?: string | undefined;
   meHandle?: string | undefined;
+  boardTab: "weekly" | "lifetime" | "contest";
+  config: any;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const { reduced } = useMotionPreference();
@@ -442,7 +473,13 @@ function LeaderboardTable({
       }
       setBusy(row.id);
       try {
-        await downloadArcadeCertificate(row);
+        const title =
+          boardTab === "weekly"
+            ? "Signal Rush Weekly Leaderboard"
+            : boardTab === "contest"
+            ? (config.contest?.title ?? "Signal Rush Tournament")
+            : "Signal Rush All-Time Leaderboard";
+        await downloadArcadeCertificate(row, title);
         toast.success(`Certificate ready — rank #${row.rank}`);
       } catch {
         toast.error("Certificate could not be generated.");
@@ -620,17 +657,35 @@ export function ArcadeStage() {
 
   const filteredRows = useMemo(() => {
     const now = Date.now();
+    const bannedIds = config.bannedPlayers ?? [];
+    const activeRuns = rows.filter((r) => !bannedIds.includes(r.playerId));
+
+    // Compute start of the current week (Monday 00:00:00 local time)
+    const startOfWeek = (() => {
+      const d = new Date();
+      const day = d.getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+      const diffToMonday = day === 0 ? -6 : 1 - day; // days back to Monday
+      d.setDate(d.getDate() + diffToMonday);
+      d.setHours(0, 0, 0, 0);
+      return d.getTime();
+    })();
+
     if (boardTab === "weekly") {
-      const resetTs = Math.min(config.weeklyResetAt ?? 0, now);
-      return rows.filter((r) => r.createdAt >= resetTs);
+      // Use admin's manual reset timestamp if it was set more recently than this week's Monday
+      const adminReset = config.weeklyResetAt ?? 0;
+      const effectiveReset = adminReset > startOfWeek ? adminReset : startOfWeek;
+      const resetTs = Math.min(effectiveReset, now);
+      const weeklyFiltered = activeRuns.filter((r) => r.createdAt >= resetTs);
+      return rank(weeklyFiltered); // group by player and rank Weekly scores 1st, 2nd...
     }
     if (boardTab === "contest") {
       const startAt = config.contest?.startAt ?? 0;
       const endAt = config.contest?.endAt ?? Infinity;
-      return rows.filter((r) => r.createdAt >= startAt && r.createdAt <= endAt);
+      const contestFiltered = activeRuns.filter((r) => r.createdAt >= startAt && r.createdAt <= endAt);
+      return rank(contestFiltered); // group by player and rank Contest scores 1st, 2nd...
     }
-    return rows; // lifetime
-  }, [rows, boardTab, config.weeklyResetAt, config.contest?.startAt, config.contest?.endAt]);
+    return rank(activeRuns); // lifetime — group by player and rank of all time
+  }, [rows, boardTab, config.weeklyResetAt, config.contest?.startAt, config.contest?.endAt, config.bannedPlayers]);
 
   const me = useMemo(() => {
     if (!player) return null;
@@ -643,16 +698,36 @@ export function ArcadeStage() {
     );
   }, [filteredRows, player]);
 
+  const lifetimeRankedRows = useMemo(() => {
+    const bannedIds = config.bannedPlayers ?? [];
+    const activeRuns = rows.filter((r) => !bannedIds.includes(r.playerId));
+    return rank(activeRuns);
+  }, [rows, config.bannedPlayers]);
+
+  const bannedPlayersNames = useMemo(() => {
+    const bannedIds = config.bannedPlayers ?? [];
+    const uniqueBanned = new Set<string>();
+    const names: string[] = [];
+    for (const r of rows) {
+      if (bannedIds.includes(r.playerId) && !uniqueBanned.has(r.playerId)) {
+        uniqueBanned.add(r.playerId);
+        names.push(`${r.name} (@${r.handle})`);
+      }
+    }
+    return names;
+  }, [rows, config.bannedPlayers]);
+
   const myLifetimeRow = useMemo(() => {
     if (!player) return null;
     return (
-      rows.find(
+      lifetimeRankedRows.find(
         (r) =>
           r.playerId === player.id ||
           (r.handle && r.handle.toLowerCase() === player.handle.toLowerCase())
       ) ?? null
     );
-  }, [rows, player]);
+  }, [lifetimeRankedRows, player]);
+
 
   const activeRank = me?.rank ?? myLifetimeRow?.rank ?? (last ? 1 : null);
   const activeScore = me?.score ?? myLifetimeRow?.score ?? (last ? Math.round(last.score) : null);
@@ -729,13 +804,29 @@ export function ArcadeStage() {
               {config.contest?.active ? (
                 <div className="flex shrink-0 flex-col items-start gap-3 lg:items-end">
                   {isContestEnded ? (
-                    <div className="flex flex-col items-start gap-2 rounded-2xl border border-rose-500/40 bg-rose-950/60 p-4 text-rose-100 shadow-xl backdrop-blur-md lg:items-end">
-                      <div className="flex items-center gap-2 font-mono text-xs font-bold uppercase tracking-wider text-rose-300">
-                        <AlertTriangle className="size-4 text-rose-400 shrink-0" />
-                        <span>⚠️ YOU ARE LATE — CONTEST HAS ENDED</span>
+                    <div className={cn(
+                      "flex flex-col items-start gap-2 rounded-2xl border p-4 shadow-xl backdrop-blur-md lg:items-end",
+                      isRegistered
+                        ? "border-emerald-500/40 bg-emerald-950/60 text-emerald-100"
+                        : "border-rose-500/40 bg-rose-950/60 text-rose-100"
+                    )}>
+                      <div className="flex items-center gap-2 font-mono text-xs font-bold uppercase tracking-wider">
+                        {isRegistered ? (
+                          <>
+                            <Trophy className="size-4 text-amber-400 shrink-0 animate-pulse" />
+                            <span className="text-emerald-300">🏆 CONTEST ENDED — RESULTS ARE IN!</span>
+                          </>
+                        ) : (
+                          <>
+                            <AlertTriangle className="size-4 text-rose-400 shrink-0" />
+                            <span className="text-rose-300">⚠️ YOU ARE LATE — CONTEST HAS ENDED</span>
+                          </>
+                        )}
                       </div>
                       <p className="text-[0.78rem] text-slate-300">
-                        Registrations for {config.contest.version} are closed. View final standings below!
+                        {isRegistered
+                          ? "Thank you for participating! Check the final tournament standings below."
+                          : `Registrations for ${config.contest.version} are closed. View final standings below!`}
                       </p>
                       <div className="flex items-center gap-2 font-mono text-[0.72rem] text-slate-300 mt-0.5">
                         <strong className="font-extrabold text-amber-300 text-sm">{(config.contest.registrations ?? []).length}</strong>{" "}
@@ -852,9 +943,9 @@ export function ArcadeStage() {
 
                 <dl className="mt-6 grid grid-cols-3 gap-3">
                   {[
-                    ["Weekly", activeScore !== null ? activeScore.toLocaleString() : "—"],
-                    ["Rank", activeRank !== null ? `#${activeRank}` : "—"],
-                    ["Runs", String(activeRuns)],
+                    ["Weekly", isBanned ? "—" : activeScore !== null ? activeScore.toLocaleString() : "—"],
+                    ["Rank", isBanned ? "BANNED" : activeRank !== null ? `#${activeRank}` : "—"],
+                    ["Runs", isBanned ? "—" : String(activeRuns)],
                   ].map(([k, v]) => (
                     <div key={k} className="rounded-2xl border border-ink/10 bg-paper/70 px-3 py-2">
                       <dt className="font-mono text-[0.58rem] uppercase tracking-[0.18em] text-ink-soft">{k}</dt>
@@ -873,7 +964,15 @@ export function ArcadeStage() {
                 {myTier && me ? (
                   <button
                     type="button"
-                    onClick={() => downloadArcadeCertificate(me)}
+                    onClick={() => {
+                      const title =
+                        boardTab === "weekly"
+                          ? "Signal Rush Weekly Leaderboard"
+                          : boardTab === "contest"
+                          ? (config.contest?.title ?? "Signal Rush Tournament")
+                          : "Signal Rush All-Time Leaderboard";
+                      void downloadArcadeCertificate(me, title);
+                    }}
                     className="mt-5 inline-flex items-center gap-2 rounded-full bg-ink px-5 py-2.5 font-mono text-[0.68rem] uppercase tracking-[0.18em] text-paper transition hover:opacity-90"
                   >
                     <Trophy className="size-3.5" />
@@ -1006,7 +1105,29 @@ export function ArcadeStage() {
         {isLoading ? (
           <p className="caption">Loading the board…</p>
         ) : (
-          <LeaderboardTable rows={filteredRows} meId={player?.id} meHandle={player?.handle} />
+          <>
+            <LeaderboardTable
+              rows={filteredRows}
+              meId={player?.id}
+              meHandle={player?.handle}
+              boardTab={boardTab}
+              config={config}
+            />
+
+            {bannedPlayersNames.length > 0 ? (
+              <div className="mt-4 flex flex-wrap items-center gap-2 rounded-2xl border border-rose-500/20 bg-rose-500/5 p-4 animate-fade-in">
+                <span className="flex size-7 items-center justify-center rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-500">
+                  <ShieldAlert className="size-4" />
+                </span>
+                <div className="flex-1 min-w-[200px]">
+                  <span className="font-mono text-[0.62rem] font-bold uppercase tracking-wider text-rose-500">Anti-Cheat Action · Standings Updated</span>
+                  <p className="text-[0.68rem] text-rose-400/90 mt-0.5 leading-relaxed font-mono">
+                    The following players have been removed from all leaderboards due to verified cheating: <span className="font-sans font-semibold underline decoration-rose-500/40 text-rose-300">{bannedPlayersNames.join(", ")}</span>
+                  </p>
+                </div>
+              </div>
+            ) : null}
+          </>
         )}
       </Section>
     </>
